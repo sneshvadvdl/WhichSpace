@@ -42,6 +42,29 @@ brew install --cask whichspace
 - Extract `WhichSpace.zip` and run `WhichSpace.app`
 - Future updates will be handled automatically
 
+### Building this local customization
+
+Install full Xcode (Command Line Tools alone cannot build this Xcode project).
+From this checkout, build an Apple Silicon app with local ad-hoc signing:
+
+```bash
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
+  -project WhichSpace.xcodeproj -scheme WhichSpace -configuration Release \
+  -destination 'platform=macOS,arch=arm64' -derivedDataPath build \
+  CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= ENABLE_HARDENED_RUNTIME=NO build
+```
+
+The resulting app is `build/Build/Products/Release/WhichSpace.app`. Leave the
+official `/Applications/WhichSpace.app` in place and quit it before opening the
+custom build. Choose **Do Not Move** if it offers to move into Applications,
+since moving could replace the official copy. Both builds use the same bundle
+identifier and saved settings.
+Disable automatic update checks in the custom build to avoid an official update
+replacing the customization. This ad-hoc build is not Developer ID signed or
+notarized; macOS may require approving it and granting Accessibility access again.
+Hardened runtime is disabled for this local build only because the bundled Sparkle
+framework has a different signing team. Official release settings remain unchanged.
+
 ## Features
 
 ### Spaces
@@ -55,9 +78,22 @@ brew install --cask whichspace
 <img src="Screenshots/ClickToSwitch.gif">
 
 > [!NOTE]
-> Inactive Spaces are dimmed by default.
+> The selected Space has a solid red background behind its indicator and app icons,
+> with white labels for contrast. App icons keep their original colors, except
+> WezTerm's purple lettering is lightened to pale lavender for readability.
+> Set **Menu Bar → Inactive Space Opacity** to **100%** to keep every Space fully opaque.
 >
 > Empty Spaces can be hidden entirely.
+
+With **Show All Spaces** or **Show All Displays** enabled, **Menu Bar → App Icons**
+sets the maximum number of application icons shown beside each Desktop indicator.
+Set it to **Off** to show indicators only. Icons follow the apps with windows on
+each Space and refresh as windows change. Clicking an app icon switches to its
+Space and brings that app's window on that Space to the front; clicking the Space
+number only switches Spaces. Split View app-icon halves focus the corresponding
+app. Full-screen Spaces keep their existing app-icon or **F** indicator.
+**Picker Style** still controls only the single-indicator dropdown. **Shrink to Fit**
+can drop app icons when the menu bar runs out of room.
 
 ---
 
@@ -71,6 +107,24 @@ brew install --cask whichspace
 > macOS allows an app only one menu bar item, mirrored on every display, so WhichSpace cannot show a different number on each monitor. This setting draws every display's Spaces into that one item.
 >
 > A vertical separator is shown between Displays.
+>
+> Display groups have light-blue, light-green, and yellow backgrounds in display order.
+> This local build supports `defaults write io.gechr.WhichSpace swapFirstDisplayGroups -bool true`
+> to swap the blue and green groups without changing their colors or Space numbers.
+> The selected Space's red box is inset inside its display's background, leaving a
+> visible colored margin. Inactive labels are dark for contrast on the pastel colors.
+> On non-selected displays, the currently visible Space has a light-red box with a
+> dark label; the selected display's active Space keeps its stronger red highlight.
+> Visible fullscreen Spaces also have a two-point outline drawn over their app
+> artwork, so the icon cannot obscure the highlight. macOS can still hide the
+> entire menu bar in fullscreen; the outline appears when the menu bar is shown.
+>
+> Optional desktop accents add a translucent edge glow and a thin matching frame
+> to each display without replacing its wallpaper or stopping dynamic animation.
+> They sit behind desktop icons, ignore clicks, and follow the display's color
+> even when menu-bar groups are reordered. Enable with
+> `defaults write io.gechr.WhichSpace desktopColorAccents -bool true`, or use
+> `-bool false` to remove them. The accents are present while WhichSpace is running.
 >
 > Full-screen apps are shown as their app icon (or **F**) and can be hidden entirely.
 

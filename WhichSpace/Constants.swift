@@ -175,8 +175,8 @@ enum Layout {
     /// Slider default, the strong tap
     static let defaultScrollHapticIntensity = 4
 
-    /// Space picker menu app icons
-    /// App icons shown per picker row before the list is truncated
+    /// App icons beside each menu bar Space and in the Space picker
+    /// App icons shown per Space before the list is truncated
     static let defaultSpacePickerMaxAppIcons = 5
     /// Slider bounds, where 0 hides the app icons entirely
     static let spacePickerMaxAppIconsRange = 0 ... 10

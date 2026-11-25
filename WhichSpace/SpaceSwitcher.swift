@@ -248,6 +248,7 @@ enum SpaceSwitcher {
         _ target: SwitchTarget,
         fromStatusItemClick: Bool = false
     ) -> Bool {
+        appActivation.cancel()
         fullscreenActivation.cancel()
         let conn = _CGSDefaultConnection()
         let displays = systemOrdered(managedDisplays(connection: conn))
@@ -366,6 +367,7 @@ enum SpaceSwitcher {
         wrap: Bool = false,
         skippingSpaceIDs: Set<Int> = []
     ) -> Bool {
+        appActivation.cancel()
         fullscreenActivation.cancel()
         let conn = _CGSDefaultConnection()
 
@@ -1222,8 +1224,42 @@ enum SpaceSwitcher {
     // MARK: - Fullscreen Space Switching
 
     @MainActor private static let fullscreenActivation = FullscreenActivation()
+    @MainActor private static let appActivation = SpaceAppActivation()
+
+    @MainActor static func cancelAppActivation() {
+        appActivation.cancel()
+    }
+
+    @MainActor static func selectSpaceApp(spaceID: Int, ownerPID: pid_t, isFullscreen: Bool) {
+        appActivation.cancel()
+        let conn = _CGSDefaultConnection()
+        guard let display = managedDisplays(connection: conn).first(where: { $0.spaces.contains { $0.id == spaceID } }) else {
+            NSLog("SpaceSwitcher: clicked app's Space %d no longer exists", spaceID)
+            return
+        }
+        if display.currentSpaceID != spaceID {
+            if isFullscreen {
+                selectFullscreenSpace(spaceID, fromStatusItemClick: true)
+            } else if !switchToSpace(id: spaceID, fromStatusItemClick: true) {
+                NSLog("SpaceSwitcher: could not switch to clicked app's Space %d", spaceID)
+                return
+            }
+        }
+        appActivation.select(
+            ready: {
+                managedDisplays(connection: conn).first { $0.identifier == display.identifier }?.currentSpaceID == spaceID
+            },
+            activate: {
+                focusWindow(on: spaceID, owners: [ownerPID], ownerPID: ownerPID)
+            },
+            onFailure: {
+                NSLog("SpaceSwitcher: could not focus app %d on Space %d", ownerPID, spaceID)
+            }
+        )
+    }
 
     @MainActor static func selectFullscreenSpace(_ spaceID: Int, fromStatusItemClick: Bool = false) {
+        appActivation.cancel()
         let conn = _CGSDefaultConnection()
         let provider = CGSDisplaySpaceProvider()
         func step(on display: ManagedDisplay) -> Bool {
@@ -1250,7 +1286,7 @@ enum SpaceSwitcher {
 
         func activate(on display: ManagedDisplay) -> Bool {
             let owners = display.spaces.first { $0.id == spaceID }?.tileOwners ?? []
-            return focusFullscreenWindow(on: spaceID, owners: owners) || activateAppOnSpace(spaceID)
+            return focusWindow(on: spaceID, owners: owners) || activateAppOnSpace(spaceID)
         }
 
         fullscreenActivation.select(
@@ -1265,19 +1301,25 @@ enum SpaceSwitcher {
         ) { predictions.removeValue(forKey: $0.identifier) }
     }
 
-    @MainActor private static func focusFullscreenWindow(on spaceID: Int, owners: [pid_t]) -> Bool {
+    @MainActor private static func focusWindow(on spaceID: Int, owners: [pid_t], ownerPID: pid_t? = nil) -> Bool {
         let options: CGWindowListOption = [.optionAll, .excludeDesktopElements]
         guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
             return false
         }
         let mover = SkyLightWindowMover()
-        return focusFullscreenWindow(
-            on: spaceID, owners: owners, windows: list, membership: mover.spaceIDs(forWindow:)
+        return focusWindow(
+            on: spaceID, owners: owners, windows: list, membership: mover.spaceIDs(forWindow:), ownerPID: ownerPID
         ) { window in
-            guard AXWindowRaiser().raise(window) else {
+            guard let app = NSRunningApplication(processIdentifier: window.ownerPID) else {
                 return false
             }
-            return NSRunningApplication(processIdentifier: window.ownerPID)?.activate(options: []) == true
+            if ownerPID != nil, app.isHidden, !app.unhide() {
+                return false
+            }
+            guard AXWindowRaiser(restoreMinimized: ownerPID != nil).raise(window) else {
+                return false
+            }
+            return app.activate(options: [])
         }
     }
 
@@ -1308,19 +1350,21 @@ enum SpaceSwitcher {
         return classic || alreadyCurrent ? .activate : .step(at: center)
     }
 
-    /// Two windows of the same application may occupy different fullscreen
+    /// Two windows of the same application may occupy different
     /// Spaces. Only raise a window belonging exclusively to this target.
-    static func focusFullscreenWindow(
+    static func focusWindow(
         on spaceID: Int,
         owners: [pid_t],
         windows: [[String: Any]],
         membership: (CGWindowID) -> [Int],
+        ownerPID: pid_t? = nil,
         focus: (FrontWindow) -> Bool
     ) -> Bool {
         let excluded = FullscreenSpaceOwners.excludedPIDs
         let candidates = windows.compactMap { info -> FrontWindow? in
             guard info[kCGWindowLayer as String] as? Int == 0,
                   let pid = info[kCGWindowOwnerPID as String] as? pid_t,
+                  ownerPID == nil || ownerPID == pid,
                   !excluded.contains(pid),
                   let id = info[kCGWindowNumber as String] as? CGWindowID
             else {
@@ -1373,6 +1417,43 @@ enum SpaceSwitcher {
 
         NSLog("SpaceSwitcher: no app found on space \(spaceID)")
         return false
+    }
+}
+
+/// Waits for the requested Space before focusing an app, rather than letting
+/// application activation choose a window on another Space.
+@MainActor
+final class SpaceAppActivation {
+    private(set) var pending: Task<Void, Never>?
+
+    func cancel() {
+        pending?.cancel()
+        pending = nil
+    }
+
+    func select(
+        ready: @escaping () -> Bool,
+        activate: @escaping () -> Bool,
+        delay: Duration = .milliseconds(50),
+        attempts: Int = 60,
+        onFailure: @escaping () -> Void = {}
+    ) {
+        cancel()
+        pending = Task {
+            for _ in 0 ..< attempts {
+                guard !Task.isCancelled else { return }
+                if ready() {
+                    let activated = activate()
+                    pending = nil
+                    if !activated { onFailure() }
+                    return
+                }
+                try? await Task.sleep(for: delay)
+            }
+            guard !Task.isCancelled else { return }
+            pending = nil
+            onFailure()
+        }
     }
 }
 

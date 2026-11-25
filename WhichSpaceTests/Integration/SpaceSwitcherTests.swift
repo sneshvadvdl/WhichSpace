@@ -52,7 +52,7 @@ struct SpaceSwitcherTests {
         ]
         let membership: [CGWindowID: [Int]] = [1: [70], 2: [70, 71], 3: [71], 4: [71], 5: [71]]
         var attempted: [CGWindowID] = []
-        let focused = SpaceSwitcher.focusFullscreenWindow(
+        let focused = SpaceSwitcher.focusWindow(
             on: 71,
             owners: [ownPID, 15, 22],
             windows: windows,
@@ -65,9 +65,80 @@ struct SpaceSwitcherTests {
         }
         #expect(focused)
         #expect(attempted == [3, 4])
-        #expect(!SpaceSwitcher.focusFullscreenWindow(on: 72, owners: [15], windows: windows, membership: {
+        #expect(!SpaceSwitcher.focusWindow(on: 72, owners: [15], windows: windows, membership: {
             membership[$0] ?? []
         }) { _ in true })
+    }
+
+    @Test("app icon activation cannot raise a different app or a sibling on another Space")
+    func clickedAppFocusUsesExactOwnerAndSpace() {
+        func window(_ id: CGWindowID, pid: pid_t) -> [String: Any] {
+            [kCGWindowLayer as String: 0, kCGWindowNumber as String: id, kCGWindowOwnerPID as String: pid]
+        }
+        let windows = [window(1, pid: 22), window(2, pid: 11), window(3, pid: 22)]
+        let spaces: [CGWindowID: [Int]] = [1: [40], 2: [41], 3: [41]]
+        var raised: [CGWindowID] = []
+        #expect(SpaceSwitcher.focusWindow(
+            on: 41, owners: [22], windows: windows,
+            membership: { spaces[$0] ?? [] }, ownerPID: 22
+        ) { window in
+            raised.append(window.id)
+            return true
+        })
+        #expect(raised == [3])
+        #expect(!SpaceSwitcher.focusWindow(
+            on: 41, owners: [99], windows: windows,
+            membership: { spaces[$0] ?? [] }, ownerPID: 99
+        ) { _ in Issue.record("Must not focus another app"); return true })
+    }
+
+    @Test("app activation waits for the target Space to become visible")
+    @MainActor
+    func appActivationWaitsForSpace() async throws {
+        let selection = SpaceAppActivation()
+        var checks = 0
+        var activations = 0
+        selection.select(
+            ready: { checks += 1; return checks == 2 },
+            activate: { activations += 1; return true },
+            delay: .zero
+        )
+        let pending = try #require(selection.pending)
+        await pending.value
+        #expect(checks == 2 && activations == 1)
+        #expect(selection.pending == nil)
+    }
+
+    @Test("a newer app click cancels stale app activation")
+    @MainActor
+    func appActivationSupersedesPreviousClick() async throws {
+        let selection = SpaceAppActivation()
+        var activated: [Int] = []
+        selection.select(ready: { true }, activate: { activated.append(1); return true }, delay: .zero)
+        let old = try #require(selection.pending)
+        selection.select(ready: { true }, activate: { activated.append(2); return true }, delay: .zero)
+        let latest = try #require(selection.pending)
+        await old.value
+        await latest.value
+        #expect(activated == [2])
+    }
+
+    @Test("failed Space or app activation terminates without focusing a fallback app", arguments: [false, true])
+    @MainActor
+    func appActivationFailureIsBounded(visible: Bool) async throws {
+        let selection = SpaceAppActivation()
+        var activations = 0
+        var failed = false
+        selection.select(
+            ready: { visible },
+            activate: { activations += 1; return false },
+            delay: .zero, attempts: 2,
+            onFailure: { failed = true }
+        )
+        let pending = try #require(selection.pending)
+        await pending.value
+        #expect(activations == (visible ? 1 : 0))
+        #expect(failed && selection.pending == nil)
     }
 
     @Test("status-item mouse-up stays instant only on macOS 27")

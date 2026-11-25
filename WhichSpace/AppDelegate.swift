@@ -102,6 +102,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
     private var scrollMonitor: Any?
     private var globalScrollMonitor: Any?
     private var statusBarItem: NSStatusItem!
+    private let desktopAccents = DesktopAccentController()
 
     /// Switches one Space left or right; injectable so scroll tests don't move real Spaces
     private let relativeSpaceSwitchAction: (_ goRight: Bool, _ wrap: Bool) -> Bool
@@ -978,6 +979,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
             Self.logger.info("click ignored: no current event")
             return
         }
+        SpaceSwitcher.cancelAppActivation()
         if event.isRightClick {
             prepareStatusMenuLabelField(spaceID: slotSpaceID(under: event, button: button))
             showStatusMenu(statusMenu)
@@ -1075,6 +1077,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         guard let slot = layout.slot(at: clickX) else {
             let width = layout.totalWidth
             Self.logger.info("click ignored: no slot at x \(clickX) of width \(width)")
+            return
+        }
+
+        if let ownerPID = slot.appPID(at: clickX) {
+            SpaceSwitcher.selectSpaceApp(
+                spaceID: slot.spaceID,
+                ownerPID: ownerPID,
+                isFullscreen: slot.targetSpace == nil
+            )
             return
         }
 
@@ -1439,6 +1450,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, SPUUpd
         guard let statusBarItem else {
             return
         }
+        desktopAccents.update(displays: appState.allDisplaysSpaceInfo, enabled: store.desktopColorAccents)
         // Ahead of the unchanged-icon check: the same icon can outlive a
         // change of Space, and the announced label has to follow the Space
         updateStatusBarAccessibilityLabel()

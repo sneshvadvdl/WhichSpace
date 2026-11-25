@@ -3,6 +3,54 @@ import Testing
 @testable import WhichSpace
 
 @MainActor
+struct DesktopAccentTests {
+    @Test("desktop accents match the menu-bar palette while leaving the wallpaper center transparent", arguments: [0, 1, 2])
+    func preservesWallpaper(displayIndex: Int) throws {
+        let color = StatusBarRenderer.displayBackgroundColors[displayIndex]
+        let view = DesktopAccentView(frame: NSRect(x: 0, y: 0, width: 300, height: 200), color: color)
+        let bitmap = try #require(NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: 300, pixelsHigh: 200,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+            isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+        ))
+        let context = try #require(NSGraphicsContext(bitmapImageRep: bitmap))
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        NSColor.clear.setFill()
+        view.bounds.fill(using: .copy)
+        view.draw(view.bounds)
+        NSGraphicsContext.restoreGraphicsState()
+        let center = try #require(bitmap.colorAt(x: 150, y: 100))
+        let glow = try #require(bitmap.colorAt(x: 15, y: 100))
+        let edge = try #require(bitmap.colorAt(x: 1, y: 100)?.usingColorSpace(.deviceRGB))
+        let expected = try #require(color.usingColorSpace(.deviceRGB))
+        #expect(center.alphaComponent < 0.01)
+        #expect(glow.alphaComponent > 0.05 && glow.alphaComponent < 0.5)
+        #expect(edge.alphaComponent > 0.8 && edge.alphaComponent < 1)
+        #expect(abs(edge.redComponent - expected.redComponent) < 0.02)
+        #expect(abs(edge.greenComponent - expected.greenComponent) < 0.02)
+        #expect(abs(edge.blueComponent - expected.blueComponent) < 0.02)
+    }
+
+    @Test("desktop accents stay behind icons and never take focus or intercept clicks")
+    func noninteractiveDesktopWindow() throws {
+        let frame = try #require(NSScreen.screens.first).frame
+        let window = DesktopAccentWindow(
+            frame: frame,
+            color: StatusBarRenderer.displayBackgroundColors[0]
+        )
+        defer { window.close() }
+        #expect(window.ignoresMouseEvents)
+        #expect(!window.canBecomeKey && !window.canBecomeMain)
+        #expect(!window.isOpaque)
+        #expect(window.frame == frame)
+        #expect(window.level.rawValue > Int(CGWindowLevelForKey(.desktopWindow)))
+        #expect(window.level.rawValue < Int(CGWindowLevelForKey(.desktopIconWindow)))
+        #expect(window.collectionBehavior.contains(.canJoinAllSpaces))
+    }
+}
+
+@MainActor
 struct SettingsIconTests {
     private let store: DefaultsStore
     private let stub: CGSStub
@@ -322,6 +370,7 @@ struct NativeMenuBarTintTests {
 
     init() {
         store = DefaultsStore(suite: TestSuiteFactory.createSuite().suite)
+        store.inactiveSpaceOpacity = 100
         stub.activeDisplayIdentifier = "Main"
         stub.displays = [
             CGSStub.makeDisplay(
@@ -359,14 +408,22 @@ struct NativeMenuBarTintTests {
         #expect(appState.renderer.statusBarIcon(level: .full).isTemplate)
     }
 
-    /// A mixed strip must leave even its otherwise eligible first label
-    /// unchanged, including the foreground rather than punching a hole in it.
-    private func expectConfiguredFirstSlot(_ image: NSImage, appState: AppState) throws {
+    /// Highlighting the selection must not recolor another Space's artwork.
+    private func expectConfiguredInactiveSlot(_ image: NSImage, appState: AppState) throws {
         let actual = try bitmap(image)
-        let expected = try bitmap(appState.renderer.settingsIcon(forSpace: 1, display: "Main"))
-        for y in 0 ..< expected.pixelsHigh {
-            for x in 0 ..< expected.pixelsWide {
-                #expect(actual.colorAt(x: x, y: y) == expected.colorAt(x: x, y: y))
+        let slot = try #require(appState.statusBarLayout().slots.first { $0.spaceID != appState.currentSpaceID })
+        let display = try #require(appState.allDisplaysSpaceInfo.first { $0.entries.contains { $0.id == slot.spaceID } })
+        let index = try #require(display.entries.firstIndex { $0.id == slot.spaceID })
+        let indicator = appState.renderer.settingsIcon(forSpace: index + 1, display: display.displayID)
+        let expected = try bitmap(indicator)
+        let actualScale = Double(actual.pixelsWide) / image.size.width
+        let expectedScale = Double(expected.pixelsWide) / indicator.size.width
+        let inset = Int(3 * Double(expected.pixelsHigh) / indicator.size.height)
+        for y in inset ..< expected.pixelsHigh - inset {
+            for x in inset ..< expected.pixelsWide - inset {
+                let sampleX = Int(((slot.startX + Double(x) / expectedScale) * actualScale).rounded())
+                let sampleY = Int((Double(y) / expectedScale * actualScale).rounded())
+                #expect(actual.colorAt(x: sampleX, y: sampleY) == expected.colorAt(x: x, y: y))
             }
         }
     }
@@ -416,7 +473,7 @@ struct NativeMenuBarTintTests {
     }
 
     @Test(
-        "mixed artwork preserves the entire strip",
+        "selection highlighting preserves inactive artwork",
         arguments: ["symbol", "emoji", "label", "badge", "outline", "color"]
     )
     func mixedArtwork(kind: String) throws {
@@ -438,7 +495,7 @@ struct NativeMenuBarTintTests {
         let appState = makeAppState()
         let image = appState.renderer.statusBarIcon(level: .full)
         #expect(!image.isTemplate)
-        try expectConfiguredFirstSlot(image, appState: appState)
+        try expectConfiguredInactiveSlot(image, appState: appState)
     }
 
     @Test("inherited custom colors retain their artwork", arguments: [false, true])
@@ -456,7 +513,7 @@ struct NativeMenuBarTintTests {
             .tiffRepresentation)
     }
 
-    @Test("fullscreen app artwork prevents tint but its letter fallback supports it")
+    @Test("fullscreen app artwork and letter fallback retain the colored selection background")
     func fullscreenArtwork() throws {
         store.showAllSpaces = true
         stub.displays = [
@@ -478,19 +535,19 @@ struct NativeMenuBarTintTests {
         appState.renderer.invalidateIconCache()
         let image = appState.renderer.statusBarIcon(level: .full)
         #expect(!image.isTemplate)
-        try expectConfiguredFirstSlot(image, appState: appState)
+        try expectConfiguredInactiveSlot(image, appState: appState)
 
         appState.renderer.fullscreenAppIconResolver = { _ in nil }
         appState.renderer.invalidateIconCache()
         #expect(!appState.renderer.statusBarIcon(level: .full).isTemplate)
 
         store.fullscreenIconStyle = .letter
-        #expect(appState.renderer.statusBarIcon(level: .full).isTemplate)
+        #expect(!appState.renderer.statusBarIcon(level: .full).isTemplate)
         store.fullscreenIconStyle = .appIcon
         #expect(!appState.renderer.statusBarIcon(level: .full).isTemplate)
         stub.fullscreenOwnerPIDsMap = [101: 53]
         appState.renderer.spaceSnapshotDidChange()
-        #expect(appState.renderer.statusBarIcon(level: .full).isTemplate)
+        #expect(!appState.renderer.statusBarIcon(level: .full).isTemplate)
     }
 
     @Test("closing a fullscreen window keeps its artwork until its Space disappears")
@@ -527,10 +584,10 @@ struct NativeMenuBarTintTests {
         #expect(!appState.renderer.statusBarIcon(level: .full).isTemplate)
         setSpaces([desktop], current: desktop.id)
         appState.forceSpaceUpdate()
-        #expect(appState.renderer.statusBarIcon(level: .full).isTemplate)
+        #expect(!appState.renderer.statusBarIcon(level: .full).isTemplate)
         setSpaces([desktop, fullscreen], current: desktop.id)
         appState.forceSpaceUpdate()
-        #expect(appState.renderer.statusBarIcon(level: .full).isTemplate)
+        #expect(!appState.renderer.statusBarIcon(level: .full).isTemplate)
     }
 
     @Test("text labels and badges support tint without changing layout")
@@ -544,13 +601,13 @@ struct NativeMenuBarTintTests {
         #expect(image.size == original.size)
     }
 
-    @Test("combined templates retain inactive opacity")
+    @Test("highlighted Space strips retain configured inactive opacity")
     func inactiveOpacity() throws {
         store.showAllSpaces = true
         store.inactiveSpaceOpacity = 25
         let appState = makeAppState()
         let image = appState.renderer.statusBarIcon(level: .full)
-        #expect(image.isTemplate)
+        #expect(!image.isTemplate)
         let rep = try bitmap(image)
         var activeAlpha = 0.0
         var inactiveAlpha = 0.0
@@ -568,12 +625,12 @@ struct NativeMenuBarTintTests {
         #expect(abs(inactiveAlpha - 0.25) < 0.01)
     }
 
-    @Test("only visible custom separators prevent native tint")
+    @Test("display separators retain their color and opacity alongside the selection background")
     func displaySeparators() throws {
         store.showAllDisplays = true
         store.separatorColor = .red
         let appState = makeAppState()
-        #expect(appState.renderer.statusBarIcon(level: .full).isTemplate)
+        #expect(!appState.renderer.statusBarIcon(level: .full).isTemplate)
 
         stub.displays.append(CGSStub.makeDisplay(
             displayID: "Secondary",
@@ -583,15 +640,14 @@ struct NativeMenuBarTintTests {
         appState.forceSpaceUpdate()
         let mixed = appState.renderer.statusBarIcon(level: .full)
         #expect(!mixed.isTemplate)
-        try expectConfiguredFirstSlot(mixed, appState: appState)
 
         store.separatorStyle = .blank
-        #expect(appState.renderer.statusBarIcon(level: .full).isTemplate)
+        #expect(!appState.renderer.statusBarIcon(level: .full).isTemplate)
 
         store.separatorStyle = .line
         store.separatorColor = nil
         let tinted = appState.renderer.statusBarIcon(level: .full)
-        #expect(tinted.isTemplate)
+        #expect(!tinted.isTemplate)
         let rep = try bitmap(tinted)
         let slots = appState.renderer.statusBarLayout(level: .full).slots
         let separatorStart = slots[1].startX - Layout.displaySeparatorWidth
@@ -606,7 +662,7 @@ struct NativeMenuBarTintTests {
         #expect(abs(alpha / scale - 0.6) < 0.05)
     }
 
-    @Test("native tint preserves slot widths", arguments: IconStyle.allCases.filter(\.isFilled), [0.0, 100.0])
+    @Test("selection backgrounds preserve slot widths", arguments: IconStyle.allCases.filter(\.isFilled), [0.0, 100.0])
     func matchingLayoutWidths(style: IconStyle, padding: Double) {
         store.showAllSpaces = true
         store.spaceLabels = [1: "Long label", 2: "Another label"]
@@ -624,32 +680,119 @@ struct NativeMenuBarTintTests {
         #expect(abs(custom.size.width - customWidth) < 0.01)
     }
 
-    @Test("artwork on another display prevents tint across every display")
-    func crossDisplayArtwork() throws {
+    @Test("display groups keep their colors and click targets when the first two swap", arguments: [false, true])
+    func displayGroupBackgrounds(swapped: Bool) throws {
         store.showAllDisplays = true
+        store.swapFirstDisplayGroups = swapped
         stub.displays.append(CGSStub.makeDisplay(
             displayID: "Secondary",
             spaces: [(id: 200, isFullscreen: false)],
             activeSpaceID: 200
         ))
-        store.displaySpaceColors = ["Secondary": [1: SpaceColors(foreground: .yellow, background: .blue)]]
+        stub.displays.append(CGSStub.makeDisplay(
+            displayID: "Third",
+            spaces: [(id: 300, isFullscreen: false)],
+            activeSpaceID: 300
+        ))
         let appState = makeAppState()
-        let image = appState.renderer.statusBarIcon(level: .full)
-        #expect(!image.isTemplate)
-        try expectConfiguredFirstSlot(image, appState: appState)
+        for selectedDisplay in ["Main", "Third"] {
+            stub.activeDisplayIdentifier = selectedDisplay
+            appState.forceSpaceUpdate()
+            let image = appState.statusBarIcon
+            let rep = try bitmap(image)
+            let layout = appState.statusBarLayout()
+            try #require(layout.slots.count == 3)
+            #expect(layout.slots.map(\.spaceID) == (swapped ? [200, 100, 300] : [100, 200, 300]))
+            #expect(abs(image.size.width - layout.totalWidth) < 0.01)
+            let scale = Double(rep.pixelsWide) / image.size.width
+            func color(in slot: StatusBarIconSlot, y: Double) throws -> NSColor {
+                let x = Int(((slot.startX + 4) * scale).rounded())
+                return try #require(rep.colorAt(x: x, y: Int((y * scale).rounded()))?.usingColorSpace(.deviceRGB))
+            }
+            let blue = try color(in: layout.slots[swapped ? 1 : 0], y: 1)
+            let green = try color(in: layout.slots[swapped ? 0 : 1], y: 1)
+            let yellow = try color(in: layout.slots[2], y: 1)
+            #expect(blue.blueComponent > blue.redComponent && blue.blueComponent > blue.greenComponent)
+            #expect(green.greenComponent > green.redComponent && green.greenComponent > green.blueComponent)
+            #expect(yellow.redComponent > yellow.blueComponent + 0.2)
+            #expect(yellow.greenComponent > yellow.blueComponent + 0.2)
+            for outer in [blue, green, yellow] {
+                #expect(outer.alphaComponent > 0.99)
+            }
+            let selected = try #require(layout.slots.first { $0.spaceID == appState.currentSpaceID })
+            let red = try color(in: selected, y: Layout.statusItemHeight / 2)
+            #expect(red.redComponent > red.greenComponent * 1.5 && red.redComponent > red.blueComponent * 1.5)
+            #expect(red.alphaComponent > 0.99)
+            for slot in layout.slots {
+                #expect(layout.slot(at: slot.startX + slot.width / 2)?.spaceID == slot.spaceID)
+            }
+        }
     }
 
-    @Test("hidden artwork and shrunk-away symbols do not prevent tint")
+    @Test("visible Spaces on unfocused displays are light red and follow display and Space changes")
+    func unfocusedVisibleSpaceBackgrounds() throws {
+        store.showAllDisplays = true
+        store.showAllSpaces = true
+        store.swapFirstDisplayGroups = true
+        let appState = makeAppState()
+        for (focusedDisplay, thirdActiveSpace) in [("Main", 300), ("Secondary", 300), ("Third", 300), ("Main", 301)] {
+            stub.activeDisplayIdentifier = focusedDisplay
+            stub.displays = [
+                CGSStub.makeDisplay(
+                    displayID: "Main",
+                    spaces: [(id: 100, isFullscreen: false), (id: 101, isFullscreen: false)],
+                    activeSpaceID: 100
+                ),
+                CGSStub.makeDisplay(
+                    displayID: "Secondary",
+                    spaces: [(id: 200, isFullscreen: false), (id: 201, isFullscreen: false)],
+                    activeSpaceID: 200
+                ),
+                CGSStub.makeDisplay(
+                    displayID: "Third",
+                    spaces: [(id: 300, isFullscreen: false), (id: 301, isFullscreen: true)],
+                    activeSpaceID: thirdActiveSpace
+                ),
+            ]
+            appState.forceSpaceUpdate()
+            let image = appState.statusBarIcon
+            let rep = try bitmap(image)
+            let layout = appState.statusBarLayout()
+            try #require(layout.slots.count == 6)
+            #expect(abs(image.size.width - layout.totalWidth) < 0.01)
+            let scale = Double(rep.pixelsWide) / image.size.width
+            let visibleSpaceIDs: Set<Int> = [100, 200, thirdActiveSpace]
+            for slot in layout.slots {
+                let x = Int(((slot.startX + 4) * scale).rounded())
+                let y = Int((Layout.statusItemHeight / 2 * scale).rounded())
+                let color = try #require(rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB))
+                let isLightRed = color.redComponent > color.greenComponent + 0.1
+                    && color.redComponent > color.blueComponent + 0.1
+                    && color.greenComponent > 0.4 && color.blueComponent > 0.4
+                #expect(color.alphaComponent > 0.99)
+                if slot.spaceID == appState.currentSpaceID {
+                    #expect(color.redComponent > color.greenComponent * 1.5)
+                    #expect(color.redComponent > color.blueComponent * 1.5)
+                    #expect(!isLightRed)
+                } else {
+                    #expect(isLightRed == visibleSpaceIDs.contains(slot.spaceID))
+                }
+                #expect(layout.slot(at: slot.startX + slot.width / 2)?.spaceID == slot.spaceID)
+            }
+        }
+    }
+
+    @Test("selection backgrounds remain when artwork is hidden or shrunk away")
     func visibleArtworkOnly() {
         store.showAllSpaces = true
         store.spaceSymbols = [2: "star.fill"]
         let appState = makeAppState()
         #expect(!appState.renderer.statusBarIcon(level: .full).isTemplate)
-        #expect(appState.renderer.statusBarIcon(level: .compact).isTemplate)
+        #expect(!appState.renderer.statusBarIcon(level: .compact).isTemplate)
         #expect(appState.renderer.statusBarIcon(level: .currentOnly).isTemplate)
 
         store.hideEmptySpaces = true
         stub.spacesWithWindowsSet = [100]
-        #expect(appState.renderer.statusBarIcon(level: .full).isTemplate)
+        #expect(!appState.renderer.statusBarIcon(level: .full).isTemplate)
     }
 }

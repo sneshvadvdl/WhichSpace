@@ -134,6 +134,8 @@ enum KeySpecs {
     static let separatorColor = TypedKeySpec(name: "separatorColor", defaultValue: Data?.none)
     static let separatorStyle = TypedKeySpec(name: "separatorStyle", defaultValue: SeparatorStyle.line)
     static let showAllDisplays = TypedKeySpec(name: "showAllDisplays", defaultValue: false)
+    static let swapFirstDisplayGroups = TypedKeySpec(name: "swapFirstDisplayGroups", defaultValue: false)
+    static let desktopColorAccents = TypedKeySpec(name: "desktopColorAccents", defaultValue: false)
     static let showAllSpaces = TypedKeySpec(name: "showAllSpaces", defaultValue: false)
     static let shrinkIconToFit = TypedKeySpec(name: "shrinkIconToFit", defaultValue: false)
     static let sizeScale = TypedKeySpec(name: "sizeScale", defaultValue: Layout.defaultSizeScale)
@@ -205,6 +207,8 @@ enum KeySpecs {
         separatorColor,
         separatorStyle,
         showAllDisplays,
+        swapFirstDisplayGroups,
+        desktopColorAccents,
         showAllSpaces,
         shrinkIconToFit,
         sizeScale,
@@ -667,6 +671,16 @@ final class DefaultsStore {
     var showAllDisplays: Bool {
         get { self[KeySpecs.showAllDisplays] }
         set { self[KeySpecs.showAllDisplays] = newValue }
+    }
+
+    var swapFirstDisplayGroups: Bool {
+        get { self[KeySpecs.swapFirstDisplayGroups] }
+        set { self[KeySpecs.swapFirstDisplayGroups] = newValue }
+    }
+
+    var desktopColorAccents: Bool {
+        get { self[KeySpecs.desktopColorAccents] }
+        set { self[KeySpecs.desktopColorAccents] = newValue }
     }
 
     var showAllSpaces: Bool {

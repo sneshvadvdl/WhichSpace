@@ -178,9 +178,6 @@ struct MenuBarPane: View {
                 step: 1,
                 defaultValue: Double(Layout.defaultSpacePickerMaxAppIcons),
                 icon: "app.badge",
-                // The picker menu only appears in single-icon mode, so the
-                // rows fade while the bar shows every Space
-                dimmed: !showsCurrentSpaceOnly,
                 subtitle: Localization.tipPickerAppIcons,
                 anchor: .spacePickerIcons,
                 // Explicit so the trailing closure reads as the formatter

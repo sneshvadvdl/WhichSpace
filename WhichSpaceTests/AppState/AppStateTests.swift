@@ -532,8 +532,8 @@ struct AppStateTests {
         }
     }
 
-    @Test("showAllDisplays: inactive Space uses configured opacity")
-    func showAllDisplays_inactiveSpaceUsesConfiguredOpacity() throws {
+    @Test("showAllDisplays: inactive artwork uses configured opacity over an opaque display background")
+    func showAllDisplays_inactiveArtworkUsesConfiguredOpacity() throws {
         store.showAllDisplays = true
         store.inactiveSpaceOpacity = 65
         stub.activeDisplayIdentifier = "DisplayA"
@@ -569,13 +569,23 @@ struct AppStateTests {
             height: bitmap.pixelsHigh
         ))
 
-        let ratio = inactiveAlpha / activeAlpha
-        #expect(ratio > 0.55)
-        #expect(ratio < 0.75)
+        #expect(activeAlpha > 0.99)
+        #expect(inactiveAlpha > 0.99)
+        store.inactiveSpaceOpacity = 100
+        let fullOpacity = try #require(sut.statusBarIcon.bitmapRepresentation())
+        var changedPixels = 0
+        for x in segmentWidth + separatorWidth ..< 2 * segmentWidth + separatorWidth {
+            for y in 0 ..< bitmap.pixelsHigh {
+                if bitmap.colorAt(x: x, y: y) != fullOpacity.colorAt(x: x, y: y) {
+                    changedPixels += 1
+                }
+            }
+        }
+        #expect(changedPixels > 0)
     }
 
-    @Test("combined mode: only the current Space is undimmed across displays")
-    func combinedMode_onlyCurrentSpaceIsUndimmedAcrossDisplays() throws {
+    @Test("combined mode: display backgrounds remain opaque across all Spaces")
+    func combinedMode_displayBackgroundsRemainOpaque() throws {
         store.showAllDisplays = true
         store.showAllSpaces = true
         store.inactiveSpaceOpacity = Layout.defaultInactiveSpaceOpacity
@@ -610,9 +620,8 @@ struct AppStateTests {
             ))
         }
 
-        for inactiveAlpha in alphas.dropFirst() {
-            #expect(alphas[0] > inactiveAlpha)
-            #expect(inactiveAlpha / alphas[0] < 0.5)
+        for alpha in alphas {
+            #expect(alpha > 0.99)
         }
     }
 

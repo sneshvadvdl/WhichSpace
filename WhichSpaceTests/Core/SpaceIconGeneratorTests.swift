@@ -863,6 +863,39 @@ struct SpaceIconGeneratorTests {
 
     // MARK: - App Icon Normalization Tests
 
+    @Test("WezTerm lettering is lighter without changing its plate or transparency", arguments: [1.0, 0.5])
+    func wezTermLetteringContrast(alpha: Double) throws {
+        let icon = NSImage(size: NSSize(width: 32, height: 32), flipped: false) { _ in
+            NSColor(srgbRed: 0.1, green: 0.15, blue: 0.2, alpha: 1).setFill()
+            NSRect(x: 4, y: 4, width: 8, height: 24).fill()
+            NSColor(srgbRed: 0.3, green: 0.25, blue: 0.95, alpha: alpha).setFill()
+            NSRect(x: 16, y: 4, width: 8, height: 24).fill()
+            NSColor.red.setFill()
+            NSRect(x: 24, y: 4, width: 4, height: 24).fill()
+            return true
+        }
+        let original = try #require(bitmap(icon, sampling: 1))
+        let adjusted = SpaceIconGenerator.readableAppIconArtwork(icon, bundleIdentifier: "com.github.wez.wezterm")
+        let rendered = try #require(bitmap(adjusted, sampling: 1))
+        let before = try #require(original.colorAt(x: 20, y: 16)?.usingColorSpace(.deviceRGB))
+        let after = try #require(rendered.colorAt(x: 20, y: 16)?.usingColorSpace(.deviceRGB))
+        #expect(after.redComponent - before.redComponent > 0.35)
+        #expect(after.greenComponent - before.greenComponent > 0.35)
+        #expect(after.redComponent > 0.7 && after.greenComponent > 0.7)
+        #expect(after.blueComponent > 0.85)
+        #expect(abs(after.alphaComponent - before.alphaComponent) < 0.01)
+        for x in [0, 8, 26] {
+            let unchanged = try #require(original.colorAt(x: x, y: 16)?.usingColorSpace(.deviceRGB))
+            let result = try #require(rendered.colorAt(x: x, y: 16)?.usingColorSpace(.deviceRGB))
+            #expect(abs(result.redComponent - unchanged.redComponent) < 0.02)
+            #expect(abs(result.greenComponent - unchanged.greenComponent) < 0.02)
+            #expect(abs(result.blueComponent - unchanged.blueComponent) < 0.02)
+            #expect(abs(result.alphaComponent - unchanged.alphaComponent) < 0.01)
+        }
+        #expect(adjusted.size == icon.size)
+        #expect(SpaceIconGenerator.readableAppIconArtwork(icon, bundleIdentifier: "com.example.other") === icon)
+    }
+
     /// A square canvas whose opaque artwork spans the given fraction,
     /// mimicking the transparent margins apps bake into their icons.
     private func syntheticAppIcon(canvas: Double, contentFraction: Double) -> NSImage {

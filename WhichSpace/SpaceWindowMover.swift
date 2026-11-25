@@ -66,6 +66,7 @@ protocol WindowRaising: Sendable {
 /// Cross-Space AX behavior is empirical rather than documented, hence the
 /// attempt is best-effort.
 struct AXWindowRaiser: WindowRaising {
+    var restoreMinimized = false
     /// Cap on each AX round-trip. The calls message the owning process
     /// synchronously from the main actor, so a hung app must not stall
     /// WhichSpace for a nicety.
@@ -91,6 +92,15 @@ struct AXWindowRaiser: WindowRaising {
                 continue
             }
             AXUIElementSetMessagingTimeout(element, Self.messagingTimeout)
+            if restoreMinimized {
+                var minimized: CFTypeRef?
+                if AXUIElementCopyAttributeValue(element, kAXMinimizedAttribute as CFString, &minimized) == .success,
+                   minimized as? Bool == true,
+                   AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanFalse) != .success
+                {
+                    return false
+                }
+            }
             // Main marks which window a later activation should focus; the
             // raise is what reorders, so only its result counts
             AXUIElementSetAttributeValue(element, kAXMainAttribute as CFString, kCFBooleanTrue)

@@ -162,6 +162,350 @@ struct StatusBarRendererFilterTests {
         #expect(stub.spacesWithWindowsCallCount == expectedCount)
     }
 
+    // MARK: - Menu Bar App Icons
+
+    @Test("the selected Space has a solid red background and white label", arguments: [false, true])
+    func activeSpaceBackground_followsSelection(acrossDisplays: Bool) throws {
+        stub.activeDisplayIdentifier = "Main"
+        let otherDisplays = acrossDisplays ? [
+            CGSStub.makeDisplay(
+                displayID: "Other",
+                spaces: [(id: 200, isFullscreen: false)],
+                activeSpaceID: 200
+            ),
+        ] : []
+        stub.displays = makeDisplays(activeSpaceID: 100) + otherDisplays
+        stub.windowOwnerPIDsMap = [100: [11], 101: [22], 200: [33]]
+        store.showAllSpaces = true
+        store.showAllDisplays = acrossDisplays
+        store.inactiveSpaceOpacity = 100
+        store.spacePickerMaxAppIcons = 1
+        store.spaceColors = [SpacePreferences.defaultStyleSpace: SpaceColors(foreground: .black, background: .blue)]
+        let state = AppState(displaySpaceProvider: stub, skipObservers: true, store: store)
+        state.renderer.appIconResolver = { _ in
+            NSImage(size: NSSize(width: 16, height: 16), flipped: false) { rect in
+                NSColor.blue.setFill()
+                rect.fill()
+                return true
+            }
+        }
+
+        func expectSelectedBackground() throws {
+            let image = state.statusBarIcon
+            #expect(!image.isTemplate)
+            let cgImage = try #require(image.cgImage(forProposedRect: nil, context: nil, hints: nil))
+            let bitmap = NSBitmapImageRep(cgImage: cgImage)
+            let layout = state.statusBarLayout()
+            #expect(abs(image.size.width - layout.totalWidth) < 0.01)
+            for slot in layout.slots {
+                let scale = Double(bitmap.pixelsWide) / image.size.width
+                let start = Int(slot.startX * scale)
+                let end = min(bitmap.pixelsWide, Int((slot.startX + slot.width) * scale))
+                var redPixels = 0
+                var whitePixels = 0
+                var bluePixels = 0
+                var maxAlpha = 0.0
+                for x in start ..< end {
+                    for y in 0 ..< bitmap.pixelsHigh {
+                        let color = try #require(bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB))
+                        maxAlpha = max(maxAlpha, Double(color.alphaComponent))
+                        if color.redComponent > 0.6,
+                           color.redComponent > color.greenComponent * 1.5,
+                           color.redComponent > color.blueComponent * 1.5,
+                           color.alphaComponent > 0.9
+                        {
+                            redPixels += 1
+                        }
+                        if color.redComponent > 0.9, color.greenComponent > 0.9,
+                           color.blueComponent > 0.9, color.alphaComponent > 0.9
+                        {
+                            whitePixels += 1
+                        }
+                        if color.blueComponent > 0.6,
+                           color.blueComponent > color.redComponent * 1.5,
+                           color.blueComponent > color.greenComponent * 1.5,
+                           color.alphaComponent > 0.9
+                        {
+                            bluePixels += 1
+                        }
+                    }
+                }
+                #expect(maxAlpha > 0.99)
+                if slot.spaceID == state.currentSpaceID {
+                    let inset = Int((acrossDisplays ? 2.0 : 0.5) * scale)
+                    let selectionArea = (end - start - 2 * inset) * (bitmap.pixelsHigh - 2 * inset)
+                    #expect(redPixels > selectionArea / 2, "The red fill must cover most of the selection box")
+                    #expect(whitePixels > 5, "The selected label must remain legible on red")
+                    #expect(bluePixels > 50, "Application icons must retain their original colors")
+                } else {
+                    #expect(redPixels == 0)
+                }
+            }
+        }
+
+        try expectSelectedBackground()
+        stub.displays = makeDisplays(activeSpaceID: 101) + otherDisplays
+        state.forceSpaceUpdate()
+        try expectSelectedBackground()
+    }
+
+    @Test("visible fullscreen artwork cannot cover its selection border", arguments: [false, true])
+    func fullscreenArtwork_keepsVisibleBorder(acrossDisplays: Bool) throws {
+        stub.activeDisplayIdentifier = "Main"
+        stub.displays = [
+            CGSStub.makeDisplay(
+                displayID: "Main",
+                spaces: [
+                    (id: 100, isFullscreen: false),
+                    (id: 101, isFullscreen: true),
+                    (id: 102, isFullscreen: true),
+                ],
+                activeSpaceID: 101
+            ),
+        ]
+        if acrossDisplays {
+            stub.displays.append(CGSStub.makeDisplay(
+                displayID: "Other",
+                spaces: [(id: 201, isFullscreen: true)],
+                activeSpaceID: 201
+            ))
+        }
+        stub.fullscreenOwnerPIDsMap = [101: 11, 102: 22, 201: 33]
+        store.showAllSpaces = true
+        store.showAllDisplays = acrossDisplays
+        store.fullscreenIconStyle = .appIcon
+        store.sizeScale = 150
+        store.paddingScale = 0
+        store.inactiveSpaceOpacity = 100
+        let state = AppState(displaySpaceProvider: stub, skipObservers: true, store: store)
+        state.renderer.fullscreenAppIconResolver = { _ in
+            NSImage(size: NSSize(width: 32, height: 32), flipped: false) { rect in
+                NSColor.blue.setFill()
+                rect.fill()
+                return true
+            }
+        }
+        for focusedDisplay in acrossDisplays ? ["Main", "Other"] : ["Main"] {
+            stub.activeDisplayIdentifier = focusedDisplay
+            state.forceSpaceUpdate()
+            let image = state.statusBarIcon
+            let cgImage = try #require(image.cgImage(forProposedRect: nil, context: nil, hints: nil))
+            let bitmap = NSBitmapImageRep(cgImage: cgImage)
+            let layout = state.statusBarLayout()
+            #expect(abs(image.size.width - layout.totalWidth) < 0.01)
+            let scale = Double(bitmap.pixelsWide) / image.size.width
+            for slot in layout.slots where slot.spaceID != 100 {
+                let x = Int((slot.startX + slot.width / 2) * scale)
+                let y = Int((acrossDisplays ? 3.0 : 1.5) * scale)
+                let border = try #require(bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB))
+                let center = try #require(bitmap.colorAt(x: x, y: Int(Layout.statusItemHeight / 2 * scale))?.usingColorSpace(.deviceRGB))
+                #expect(center.blueComponent > center.redComponent * 1.5)
+                if slot.spaceID == state.currentSpaceID {
+                    #expect(border.redComponent > border.greenComponent * 1.5)
+                    #expect(border.redComponent > border.blueComponent * 1.5)
+                } else if slot.spaceID == 201 || slot.spaceID == 101 {
+                    #expect(border.redComponent > border.greenComponent + 0.1)
+                    #expect(border.redComponent > border.blueComponent + 0.1)
+                    #expect(border.greenComponent > 0.4)
+                } else {
+                    #expect(border.blueComponent > border.redComponent * 1.5)
+                }
+                #expect(layout.slot(at: slot.startX + slot.width / 2)?.spaceID == slot.spaceID)
+            }
+        }
+    }
+
+    @Test("app click targets follow filtered icons, display ordering, and padding", arguments: [false, true])
+    func appIconClickTargets(acrossDisplays: Bool) throws {
+        stub.activeDisplayIdentifier = "Main"
+        stub.displays = makeDisplays(activeSpaceID: 100)
+        if acrossDisplays {
+            stub.displays.append(CGSStub.makeDisplay(
+                displayID: "Other", spaces: [(id: 200, isFullscreen: false)], activeSpaceID: 200
+            ))
+        }
+        stub.windowOwnerPIDsMap = [100: [11, 22, 33, 44], 101: [55], 200: [66, 77]]
+        store.showAllSpaces = true
+        store.showAllDisplays = acrossDisplays
+        store.swapFirstDisplayGroups = acrossDisplays
+        store.spacePickerMaxAppIcons = 2
+        let state = AppState(displaySpaceProvider: stub, skipObservers: true, store: store)
+        state.renderer.appIconResolver = { pid in
+            pid == 22 ? nil : NSImage(size: NSSize(width: 16, height: 16))
+        }
+        let layout = state.statusBarLayout()
+        let owners: [Int: [pid_t]] = [100: [11, 33], 101: [55], 200: [66, 77]]
+        #expect(layout.slots.map(\.spaceID) == (acrossDisplays ? [200, 100, 101] : [100, 101]))
+        for slot in layout.slots {
+            #expect(slot.appIcons.map(\.ownerPID) == owners[slot.spaceID])
+            #expect(slot.appPID(at: slot.startX) == nil)
+            for icon in slot.appIcons {
+                #expect(slot.appPID(at: slot.startX + icon.startX + icon.width / 2) == icon.ownerPID)
+                #expect(slot.appPID(at: slot.startX + icon.startX + icon.width + 0.5) == nil)
+            }
+        }
+        store.spacePickerMaxAppIcons = 0
+        #expect(state.statusBarLayout().slots.allSatisfy { $0.appIcons.isEmpty })
+    }
+
+    @Test("app icons extend each Space's clickable slot and respect the cap")
+    func menuBarAppIcons_extendSlots() throws {
+        stub.activeDisplayIdentifier = "Main"
+        stub.displays = makeDisplays(activeSpaceID: 100)
+        stub.windowOwnerPIDsMap = [100: [11, 22, 33, 44], 101: [55]]
+        store.showAllSpaces = true
+        store.hideEmptySpaces = false
+        store.spacePickerStyle = .name
+        store.spacePickerMaxAppIcons = 2
+        let state = AppState(displaySpaceProvider: stub, skipObservers: true, store: store)
+        state.renderer.appIconResolver = { pid in
+            pid == 11 ? nil : NSImage(size: NSSize(width: 16, height: 16))
+        }
+
+        let layout = state.statusBarLayout()
+        let image = state.statusBarIcon
+        store.spacePickerMaxAppIcons = 0
+        let indicators = state.statusBarLayout()
+
+        try #require(layout.slots.count == 2)
+        try #require(indicators.slots.count == 2)
+        #expect(abs(layout.slots[0].width - indicators.slots[0].width - 38) < 0.01)
+        #expect(abs(layout.slots[1].width - indicators.slots[1].width - 19) < 0.01)
+        #expect(layout.slot(at: layout.slots[0].startX + layout.slots[0].width - 1)?.spaceID == 100)
+        #expect(layout.slot(at: layout.slots[1].startX + layout.slots[1].width - 1)?.spaceID == 101)
+        #expect(abs(image.size.width - layout.totalWidth) < 0.01)
+        #expect(!image.isTemplate, "App artwork must keep its color")
+        #expect(stub.windowOwnerPIDsCallCount == 1)
+        #expect(stub.spacesWithWindowsCallCount == 0)
+    }
+
+    @Test("menu bar icons work across displays without widening picker indicators")
+    func menuBarAppIcons_crossDisplayAndPicker() throws {
+        stub.activeDisplayIdentifier = "Main"
+        stub.displays = makeDisplays(activeSpaceID: 100) + [
+            CGSStub.makeDisplay(
+                displayID: "Other",
+                spaces: [(id: 200, isFullscreen: false)],
+                activeSpaceID: 200
+            ),
+        ]
+        stub.windowOwnerPIDsMap = [100: [11], 200: [22]]
+        store.showAllSpaces = false
+        store.showAllDisplays = true
+        store.hideEmptySpaces = false
+        store.spacePickerMaxAppIcons = 1
+        store.spacePickerStyle = .icons
+        let state = AppState(displaySpaceProvider: stub, skipObservers: true, store: store)
+        state.renderer.appIconResolver = { _ in NSImage(size: NSSize(width: 16, height: 16)) }
+
+        let layout = state.statusBarLayout()
+        let picker = state.spacePickerEntries()
+        try #require(layout.slots.count == 2)
+        try #require(picker.count == 2)
+        #expect(layout.slots.map(\.spaceID) == [100, 200])
+        #expect(abs(state.statusBarIcon.size.width - layout.totalWidth) < 0.01)
+        #expect(picker[0].appIcons.count == 1)
+        #expect(abs(picker[0].icon.size.width + 19 - layout.slots[0].width) < 0.01)
+
+        store.spacePickerMaxAppIcons = 0
+        let indicators = state.statusBarLayout()
+        try #require(indicators.slots.count == 2)
+        #expect(abs(layout.slots[1].width - indicators.slots[1].width - 19) < 0.01)
+
+        store.showAllSpaces = true
+        store.spacePickerMaxAppIcons = 1
+        #expect(state.statusBarLayout().slots.map(\.spaceID) == [100, 101, 200])
+    }
+
+    @Test("fullscreen indicators stay unchanged and shrinking drops Desktop app icons")
+    func menuBarAppIcons_fullscreenAndShrink() throws {
+        stub.activeDisplayIdentifier = "Main"
+        stub.displays = [
+            CGSStub.makeDisplay(
+                displayID: "Main",
+                spaces: [(id: 100, isFullscreen: false), (id: 101, isFullscreen: true)],
+                activeSpaceID: 100
+            ),
+        ]
+        stub.windowOwnerPIDsMap = [100: [11], 101: [22]]
+        store.showAllSpaces = true
+        store.fullscreenIconStyle = .letter
+        store.spacePickerMaxAppIcons = 1
+        let state = AppState(displaySpaceProvider: stub, skipObservers: true, store: store)
+        var resolved: [pid_t] = []
+        state.renderer.appIconResolver = { pid in
+            resolved.append(pid)
+            return NSImage(size: NSSize(width: 16, height: 16))
+        }
+
+        let layout = state.statusBarLayout()
+        try #require(layout.slots.count == 2)
+        #expect(resolved == [11])
+        store.spacePickerMaxAppIcons = 0
+        let indicators = state.statusBarLayout()
+        try #require(indicators.slots.count == 2)
+        #expect(abs(indicators.slots[1].width - layout.slots[1].width) < 0.01)
+
+        state.shrinkLevel = .compact
+        let compactWithoutIcons = state.statusBarIcon.size.width
+        store.spacePickerMaxAppIcons = 1
+        #expect(abs(state.statusBarIcon.size.width - compactWithoutIcons) < 0.01)
+    }
+
+    @Test("Off skips app scans and single-indicator mode retains picker-only icons")
+    func menuBarAppIcons_disabledModes() {
+        stub.activeDisplayIdentifier = "Main"
+        stub.displays = makeDisplays(activeSpaceID: 100)
+        store.showAllSpaces = true
+        store.spacePickerMaxAppIcons = 0
+        let state = AppState(displaySpaceProvider: stub, skipObservers: true, store: store)
+
+        _ = state.statusBarIcon
+        _ = state.statusBarLayout()
+        #expect(stub.windowOwnerPIDsCallCount == 0)
+
+        store.showAllSpaces = false
+        store.showAllDisplays = false
+        store.spacePickerMaxAppIcons = 2
+        _ = state.statusBarIcon
+        #expect(state.statusBarLayout().slots.isEmpty)
+        #expect(stub.windowOwnerPIDsCallCount == 0)
+    }
+
+    @Test("window membership changes refresh icons without a Space change or hide-empty filter")
+    func menuBarAppIcons_refreshWindowMembership() async throws {
+        stub.activeDisplayIdentifier = "Main"
+        stub.displays = makeDisplays(activeSpaceID: 100)
+        stub.windowOwnerPIDsMap = [100: [11]]
+        store.showAllSpaces = true
+        store.hideEmptySpaces = false
+        store.spacePickerMaxAppIcons = 2
+        let state = AppState(displaySpaceProvider: stub, skipObservers: true, store: store)
+        state.renderer.appIconResolver = { _ in NSImage(size: NSSize(width: 16, height: 16)) }
+        let before = state.statusBarLayout()
+        try #require(before.slots.count == 2)
+        #expect(before.slots[0].appIcons.map(\.ownerPID) == [11])
+        let cachedImage = state.statusBarIcon
+        var refreshed = false
+        state.renderer.onIconNeedsUpdate = { refreshed = true }
+
+        stub.windowOwnerPIDsMap = [101: [22, 33]]
+        state.handleSpaceUpdate(.windowMembership)
+        for _ in 0 ..< 100 where !refreshed {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(refreshed)
+        let after = state.statusBarLayout()
+        try #require(after.slots.count == 2)
+        #expect(after.slots[0].appIcons.isEmpty)
+        #expect(after.slots[1].appIcons.map(\.ownerPID) == [22, 33])
+        #expect(abs(after.slots[0].width - before.slots[0].width + 19) < 0.01)
+        #expect(abs(after.slots[1].width - before.slots[1].width - 38) < 0.01)
+        #expect(state.statusBarIcon !== cachedImage)
+        #expect(state.currentSpaceID == 100)
+        #expect(stub.spacesWithWindowsCallCount == 0)
+    }
+
     // MARK: - hideFullscreenApps
 
     @Test("hideFullscreenApps removes fullscreen spaces")
@@ -703,6 +1047,12 @@ struct SpacePickerTests {
         #expect(state.spacePickerEntries().first?.icon === first)
         #expect(owners == [52, 43])
         #expect(stub.fullscreenOwnerPIDsCallCount == 0)
+        store.showAllSpaces = true
+        let slot = try #require(state.statusBarLayout().slots.first)
+        #expect(slot.appIcons.map(\.ownerPID) == [52, 43])
+        for icon in slot.appIcons {
+            #expect(slot.appPID(at: slot.startX + icon.startX + icon.width / 2) == icon.ownerPID)
+        }
     }
 
     @Test("Split View shows one title and icon per app", arguments: [true, false], [true, false])

@@ -797,6 +797,43 @@ enum SpaceIconGenerator {
     /// faint drop shadow does not inflate the measured artwork bounds.
     private static let appIconAlphaThreshold: UInt8 = 25
 
+    static func readableAppIconArtwork(_ icon: NSImage, bundleIdentifier: String?) -> NSImage {
+        guard bundleIdentifier == "com.github.wez.wezterm" else { return icon }
+        let sample = 256
+        let canvas = CGRect(x: 0, y: 0, width: sample, height: sample)
+        guard let context = rasterizedAppIcon(icon, sample: sample, in: canvas),
+              let data = context.data
+        else {
+            NSLog("WhichSpace: could not rasterize WezTerm's icon for lighter lettering")
+            return icon
+        }
+        let pixels = data.assumingMemoryBound(to: UInt8.self)
+        for row in 0 ..< sample {
+            for column in 0 ..< sample {
+                let offset = row * context.bytesPerRow + column * 4
+                let alpha = Double(pixels[offset + 3]) / 255
+                guard alpha > 0 else { continue }
+                let red = Double(pixels[offset]) / 255 / alpha
+                let green = Double(pixels[offset + 1]) / 255 / alpha
+                let blue = Double(pixels[offset + 2]) / 255 / alpha
+                guard blue > 0.3 else { continue }
+                // Brighten the purple lettering, leaving the dark plate and
+                // transparency intact, with a soft transition at letter edges.
+                let amount = min(1, max(0, (blue - max(red, green) - 0.08) / 0.5)) * 0.8
+                guard amount > 0 else { continue }
+                for channel in 0 ..< 3 {
+                    let value = Double(pixels[offset + channel]) / 255
+                    pixels[offset + channel] = UInt8(((value * (1 - amount) + alpha * amount) * 255).rounded())
+                }
+            }
+        }
+        guard let image = context.makeImage() else {
+            NSLog("WhichSpace: could not create WezTerm's icon with lighter lettering")
+            return icon
+        }
+        return NSImage(cgImage: image, size: icon.size)
+    }
+
     /// Centers the opaque artwork and scales it to the requested fraction
     /// of the canvas. Margins vary between apps and even between the small
     /// and large representations of one icon. Measure at higher resolution
@@ -897,6 +934,22 @@ enum SpaceIconGenerator {
 
     /// A Split View shares one slot. Crop both icons at their midpoint
     /// after normalization so the artwork keeps its normal menu bar scale.
+    static func appIconFrames(count: Int, sizeScale: Double, paddingScale: Double) -> [NSRect] {
+        guard count > 0 else { return [] }
+        let scale = sizeScale / 100
+        let side = squareSize(scale: scale)
+        let canvas = effectiveStatusItemSize(contentWidth: side, sizeScale: scale, paddingScale: paddingScale)
+        let iconRect = centeredRect(size: CGSize(width: side, height: side), in: NSRect(origin: .zero, size: canvas))
+        return (0 ..< count).map { index in
+            NSRect(
+                x: iconRect.minX + Double(index) * side / Double(count),
+                y: iconRect.minY,
+                width: side / Double(count),
+                height: side
+            )
+        }
+    }
+
     static func generateAppIcon(
         _ appIcons: [NSImage],
         sizeScale: Double = Layout.defaultSizeScale,
@@ -910,18 +963,12 @@ enum SpaceIconGenerator {
             paddingScale: paddingScale
         )
         let icons = appIcons.map { normalizedAppIcon($0, side: side, artworkFraction: 1) }
-        return NSImage(size: canvasSize, flipped: false) { rect in
-            let iconRect = centeredRect(size: CGSize(width: side, height: side), in: rect)
-            for (index, icon) in icons.enumerated() {
-                let width = side / Double(icons.count)
+        let frames = appIconFrames(count: icons.count, sizeScale: sizeScale, paddingScale: paddingScale)
+        return NSImage(size: canvasSize, flipped: false) { _ in
+            for (index, pair) in zip(icons, frames).enumerated() {
+                let (icon, slice) = pair
                 let sourceWidth = icon.size.width / Double(icons.count)
                 let source = NSRect(x: Double(index) * sourceWidth, y: 0, width: sourceWidth, height: icon.size.height)
-                let slice = NSRect(
-                    x: iconRect.minX + Double(index) * width,
-                    y: iconRect.minY,
-                    width: width,
-                    height: side
-                )
                 icon.draw(in: slice, from: source, operation: .sourceOver, fraction: 1)
             }
             return true

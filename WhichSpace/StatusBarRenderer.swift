@@ -39,6 +39,7 @@ final class StatusBarRenderer {
         let displayLabel: String
         let spaceID: Int
         let isActive: Bool
+        let isDisplayActiveSpace: Bool
         let isFullscreen: Bool
     }
 
@@ -46,10 +47,19 @@ final class StatusBarRenderer {
     private struct RenderedSlotIcon {
         let slot: ResolvedSlot
         let icon: NSImage
+        let displayBackgroundColor: NSColor?
+        let appIcons: [StatusBarAppIconSlot]
     }
 
-    private struct WindowScanRequest {
+    private struct WindowScanRequest: Equatable, Sendable {
         let spaceIDs: [Int]
+        let includeOccupancy: Bool
+        let includeAppOwners: Bool
+    }
+
+    private struct WindowScanResult: Sendable {
+        let spacesWithWindows: Set<Int>
+        let appOwners: [Int: [pid_t]]
     }
 
     private struct FullscreenArtwork {
@@ -75,6 +85,7 @@ final class StatusBarRenderer {
         let isDarkMode: Bool
         let shrinkLevel: IconShrinkLevel
         let spacesWithWindows: Set<Int>
+        let appOwners: [Int: [pid_t]]
         let storeMutationCount: Int
     }
 
@@ -98,7 +109,7 @@ final class StatusBarRenderer {
         return StatusBarRenderer.pickerAppIcon(for: app)
     }
 
-    /// Original fullscreen artwork, independently injectable from the
+    /// Fullscreen artwork, independently injectable from the
     /// normalized app icons shown in the Space picker.
     var fullscreenAppIconResolver: (pid_t) -> NSImage? = { pid in
         guard let app = NSRunningApplication(processIdentifier: pid) else {
@@ -110,6 +121,7 @@ final class StatusBarRenderer {
     /// Normalized picker icons keyed by bundle identifier, so the pixel
     /// scan runs once per app rather than on every menu open.
     private static var pickerAppIconCache: [String: NSImage] = [:]
+    private static var wezTermAppIconArtwork: NSImage?
 
     /// The app's icon normalized to a uniform artwork size, so apps whose
     /// icons bake in different transparent margins still render at the
@@ -127,13 +139,22 @@ final class StatusBarRenderer {
         return normalized
     }
 
-    /// The app's original icon artwork. The system image for apps whose
+    /// The app's icon artwork. The system image for apps whose
     /// icon is a plain `.icns` file gains small representations that
     /// shrink the artwork onto an opaque plate, and the picker and status
     /// bar draw at exactly those sizes, so the bundled `.icns` is loaded
     /// directly to keep the artwork full-bleed. Apps with an asset
     /// catalog icon (`CFBundleIconName`) keep the system-provided image.
     static func appIconArtwork(for app: NSRunningApplication) -> NSImage? {
+        let isWezTerm = app.bundleIdentifier == "com.github.wez.wezterm"
+        if isWezTerm, let cached = wezTermAppIconArtwork {
+            return cached
+        }
+        func readable(_ icon: NSImage) -> NSImage {
+            let artwork = SpaceIconGenerator.readableAppIconArtwork(icon, bundleIdentifier: app.bundleIdentifier)
+            if isWezTerm { wezTermAppIconArtwork = artwork }
+            return artwork
+        }
         guard let bundleURL = app.bundleURL,
               let bundle = Bundle(url: bundleURL),
               bundle.object(forInfoDictionaryKey: "CFBundleIconName") == nil,
@@ -144,12 +165,19 @@ final class StatusBarRenderer {
               ),
               let artwork = NSImage(contentsOf: url)
         else {
-            return app.icon
+            return app.icon.map(readable)
         }
-        return artwork
+        return readable(artwork)
     }
 
     private static let spacesWithWindowsCacheTTL: TimeInterval = 0.2
+    private static let activeSpaceBackgroundColor = NSColor(srgbRed: 0.85, green: 0.05, blue: 0.08, alpha: 1)
+    private static let visibleSpaceBackgroundColor = NSColor(srgbRed: 1, green: 0.7, blue: 0.72, alpha: 1)
+    static let displayBackgroundColors = [
+        NSColor(srgbRed: 0.75, green: 0.9, blue: 1, alpha: 1),
+        NSColor(srgbRed: 0.78, green: 0.95, blue: 0.78, alpha: 1),
+        NSColor(srgbRed: 1, green: 0.95, blue: 0.55, alpha: 1),
+    ]
 
     private var backgroundScanTask: Task<Void, Never>?
     private var pendingBackgroundScan: WindowScanRequest?
@@ -168,6 +196,8 @@ final class StatusBarRenderer {
     private var cachedSpacesWithWindowsPopulated = false
     private var cachedSpacesWithWindowsSpaceIDs: [Int] = []
     private var cachedSpacesWithWindowsTime: Date = .distantPast
+    private var cachedWindowScanRequest: WindowScanRequest?
+    private var cachedAppOwners: [Int: [pid_t]] = [:]
 
     // MARK: - Icon Cache
 
@@ -190,6 +220,15 @@ final class StatusBarRenderer {
 
     var showAllDisplays: Bool {
         store.showAllDisplays
+    }
+
+    var showsMenuBarAppIcons: Bool {
+        (showAllSpaces || showAllDisplays) && store.spacePickerMaxAppIcons > 0
+    }
+
+    private var menuBarAppSpaceIDs: [Int] {
+        let displayed = appState.allDisplaysSpaceInfo.flatMap(\.entries)
+        return (displayed.isEmpty ? appState.allSpaceEntries : displayed).map(\.id)
     }
 
     func statusBarIcon(level: IconShrinkLevel) -> NSImage {
@@ -247,7 +286,8 @@ final class StatusBarRenderer {
                         width: rendered.icon.size.width,
                         label: rendered.slot.displayLabel,
                         targetSpace: rendered.slot.isFullscreen ? nil : rendered.slot.globalIndex,
-                        spaceID: rendered.slot.spaceID
+                        spaceID: rendered.slot.spaceID,
+                        appIcons: rendered.appIcons
                     ))
                     xOffset += rendered.icon.size.width
                 }
@@ -274,7 +314,8 @@ final class StatusBarRenderer {
                     width: rendered.icon.size.width,
                     label: rendered.slot.displayLabel,
                     targetSpace: rendered.slot.isFullscreen ? nil : rendered.slot.globalIndex,
-                    spaceID: rendered.slot.spaceID
+                    spaceID: rendered.slot.spaceID,
+                    appIcons: rendered.appIcons
                 )
                 xOffset += rendered.icon.size.width
                 return iconSlot
@@ -450,16 +491,21 @@ final class StatusBarRenderer {
     /// cache. Used when a trigger fired but the space state is unchanged -
     /// the window layout may still have moved between spaces.
     func refreshSpacesWithWindows() {
-        guard store.hideEmptySpaces, cachedSpacesWithWindowsPopulated else {
+        guard store.hideEmptySpaces || showsMenuBarAppIcons, cachedSpacesWithWindowsPopulated else {
             return
         }
-        scheduleBackgroundWindowScan(forSpaceIDs: cachedSpacesWithWindowsSpaceIDs)
+        scheduleBackgroundWindowScan(
+            forSpaceIDs: showsMenuBarAppIcons ? menuBarAppSpaceIDs : cachedSpacesWithWindowsSpaceIDs
+        )
     }
 
     // MARK: - Icon Cache Helpers
 
     private func buildIconCacheKey(level: IconShrinkLevel) -> IconCacheKey {
-        IconCacheKey(
+        if showsMenuBarAppIcons, level.usesCustomStyling {
+            _ = getCachedSpacesWithWindows(forSpaceIDs: menuBarAppSpaceIDs)
+        }
+        return IconCacheKey(
             allDisplaysSpaceInfo: appState.allDisplaysSpaceInfo,
             allSpaceEntries: appState.allSpaceEntries,
             currentDisplayID: appState.currentDisplayID,
@@ -469,6 +515,7 @@ final class StatusBarRenderer {
             isDarkMode: appState.darkModeEnabled,
             shrinkLevel: level,
             spacesWithWindows: cachedSpacesWithWindows,
+            appOwners: showsMenuBarAppIcons && level.usesCustomStyling ? cachedAppOwners : [:],
             storeMutationCount: store.mutationCount
         )
     }
@@ -591,38 +638,52 @@ final class StatusBarRenderer {
     private func renderedCurrentDisplayIcons(
         darkMode: Bool,
         includeHidden: Bool = false,
-        level: IconShrinkLevel = .full,
-        nativeTint: Bool = false
+        level: IconShrinkLevel = .full
     ) -> [RenderedSlotIcon] {
         renderSlotGroups(
             [resolveCurrentDisplaySlots(includeHidden: includeHidden, level: level)],
             darkMode: darkMode,
             level: level,
-            nativeTint: nativeTint
+            includeAppIcons: !includeHidden
         ).flatMap(\.self)
     }
 
     private func renderedCrossDisplayIcons(
         darkMode: Bool,
-        level: IconShrinkLevel,
-        nativeTint: Bool = false
+        level: IconShrinkLevel
     ) -> [[RenderedSlotIcon]] {
-        renderSlotGroups(
+        var groups = renderSlotGroups(
             resolveCrossDisplaySlots(level: level),
             darkMode: darkMode,
             level: level,
-            nativeTint: nativeTint
+            includeAppIcons: true,
+            useDisplayBackgrounds: true
         )
+        if store.swapFirstDisplayGroups, groups.count > 1 {
+            groups.swapAt(0, 1)
+        }
+        return groups
     }
 
-    /// Decide for the entire strip before drawing any slot, so a fallback
-    /// preserves every configured color. Only visible separators matter.
+    /// The colored selection background requires full-color artwork throughout the strip.
     private func renderSlotGroups(
         _ groups: [[ResolvedSlot]],
         darkMode: Bool,
         level: IconShrinkLevel,
-        nativeTint: Bool
+        includeAppIcons: Bool,
+        useDisplayBackgrounds: Bool = false
     ) -> [[RenderedSlotIcon]] {
+        var appIconsBySpace: [Int: [(pid: pid_t, icon: NSImage)]] = [:]
+        if includeAppIcons, showsMenuBarAppIcons, level.usesCustomStyling {
+            _ = getCachedSpacesWithWindows(forSpaceIDs: menuBarAppSpaceIDs)
+            for slot in groups.joined() where !slot.isFullscreen {
+                let icons = (cachedAppOwners[slot.spaceID] ?? []).compactMap { pid -> (pid: pid_t, icon: NSImage)? in
+                    guard let icon = appIconResolver(pid) else { return nil }
+                    return (pid, icon)
+                }
+                appIconsBySpace[slot.spaceID] = Self.capped(icons, limit: store.spacePickerMaxAppIcons).shown
+            }
+        }
         let specs = groups.map { slots in
             let labels = slots.first.map { fetchLabels(displayID: $0.displayID) } ?? [:]
             return slots.map { slot in
@@ -638,21 +699,79 @@ final class StatusBarRenderer {
                 )
             }
         }
-        let useTint = nativeTint
-            && (groups.count < 2 || store.separatorStyle == .blank || store.separatorColor == nil)
-            && specs.joined().allSatisfy(\.supportsNativeTint)
-        return zip(groups, specs).map { slots, specs in
-            zip(slots, specs).map { slot, spec in
-                RenderedSlotIcon(slot: slot, icon: render(spec, nativeTint: useTint))
+        return zip(groups, specs).enumerated().map { displayIndex, pair in
+            let (slots, specs) = pair
+            let displayColor = useDisplayBackgrounds
+                ? Self.displayBackgroundColors[displayIndex % Self.displayBackgroundColors.count]
+                : nil
+            return zip(slots, specs).map { slot, spec in
+                let indicator = render(
+                    spec,
+                    selected: includeAppIcons && slot.isActive,
+                    displayBackground: useDisplayBackgrounds && slot.isDisplayActiveSpace && !slot.isActive
+                        ? Self.visibleSpaceBackgroundColor : displayColor
+                )
+                let appended = appendAppIcons(appIconsBySpace[slot.spaceID] ?? [], to: indicator, level: level)
+                var appIcons = appended.targets
+                if slot.isFullscreen, !spec.appIcons.isEmpty {
+                    let frames = SpaceIconGenerator.appIconFrames(
+                        count: spec.appIcons.count,
+                        sizeScale: spec.sizeScale,
+                        paddingScale: spec.paddingScale
+                    )
+                    appIcons = zip(fullscreenArtwork[slot.spaceID] ?? [], frames).map { artwork, frame in
+                        StatusBarAppIconSlot(startX: frame.minX, width: frame.width, ownerPID: artwork.owner)
+                    }
+                }
+                return RenderedSlotIcon(
+                    slot: slot, icon: appended.icon, displayBackgroundColor: displayColor, appIcons: appIcons
+                )
             }
         }
+    }
+
+    private func appendAppIcons(
+        _ icons: [(pid: pid_t, icon: NSImage)],
+        to indicator: NSImage,
+        level: IconShrinkLevel
+    ) -> (icon: NSImage, targets: [StatusBarAppIconSlot]) {
+        guard !icons.isEmpty else {
+            return (indicator, [])
+        }
+        let side = min(Layout.statusItemHeight, Layout.spacePickerAppIconSize * level.sizeScale(for: store.sizeScale) / 100)
+        let spacing = 3.0
+        let size = NSSize(
+            width: indicator.size.width + Double(icons.count) * (side + spacing),
+            height: Layout.statusItemHeight
+        )
+        let targets = icons.enumerated().map { index, app in
+            StatusBarAppIconSlot(
+                startX: indicator.size.width + Double(index) * (side + spacing),
+                width: side,
+                ownerPID: app.pid
+            )
+        }
+        let image = Self.drawDeferred(size: size) {
+            indicator.draw(in: NSRect(origin: .zero, size: indicator.size))
+            var xOffset = indicator.size.width
+            for app in icons {
+                app.icon.draw(in: NSRect(
+                    x: xOffset,
+                    y: (Layout.statusItemHeight - side) / 2,
+                    width: side,
+                    height: side
+                ))
+                xOffset += side + spacing
+            }
+        }
+        image.isTemplate = false
+        return (image, targets)
     }
 
     private func generateCombinedIcon(darkMode: Bool, level: IconShrinkLevel) -> NSImage {
         let renderedIcons = renderedCurrentDisplayIcons(
             darkMode: darkMode,
-            level: level,
-            nativeTint: true
+            level: level
         )
 
         // If no spaces to show, show just the current space
@@ -674,24 +793,29 @@ final class StatusBarRenderer {
                 )
 
                 let alpha = rendered.slot.isActive ? 1.0 : inactiveAlpha
+                if rendered.slot.isActive {
+                    Self.drawBackground(in: drawRect, color: Self.activeSpaceBackgroundColor)
+                }
                 rendered.icon.draw(
                     in: drawRect,
                     from: NSRect(origin: .zero, size: rendered.icon.size),
                     operation: .sourceOver,
                     fraction: alpha
                 )
+                if rendered.slot.isActive, rendered.slot.isFullscreen {
+                    Self.drawFullscreenBorder(in: drawRect, color: Self.activeSpaceBackgroundColor, inset: 0.5)
+                }
                 xOffset += rendered.icon.size.width
             }
         }
-        image.isTemplate = renderedIcons.allSatisfy(\.icon.isTemplate)
+        image.isTemplate = false
         return image
     }
 
     private func generateCrossDisplayIcon(darkMode: Bool, level: IconShrinkLevel) -> NSImage {
         let renderedDisplays = renderedCrossDisplayIcons(
             darkMode: darkMode,
-            level: level,
-            nativeTint: true
+            level: level
         )
 
         // If no spaces to show at all, return single icon
@@ -700,17 +824,14 @@ final class StatusBarRenderer {
         }
 
         // Calculate total width: spaces + separators between displays
-        let totalSpacesWidth = renderedDisplays
-            .flatMap(\.self)
-            .reduce(0) { $0 + $1.icon.size.width }
+        let displayWidths = renderedDisplays.map { $0.reduce(0) { $0 + $1.icon.size.width } }
+        let totalSpacesWidth = displayWidths.reduce(0, +)
         let separatorCount = max(0, renderedDisplays.count - 1)
         let totalWidth = totalSpacesWidth + Double(separatorCount) * Layout.displaySeparatorWidth
 
         let imageSize = NSSize(width: totalWidth, height: Layout.statusItemHeight)
         let inactiveAlpha = store.inactiveSpaceOpacity / 100
-        let isTemplate = renderedDisplays.flatMap(\.self).allSatisfy(\.icon.isTemplate)
-        let separatorColor = isTemplate ? NSColor.black.withAlphaComponent(0.6)
-            : store.separatorColor ?? IconColors.defaultSeparator(darkMode: darkMode)
+        let separatorColor = store.separatorColor ?? IconColors.defaultSeparator(darkMode: darkMode)
         let separatorStyle = store.separatorStyle
         let image = Self.drawDeferred(size: imageSize) {
             var xOffset: Double = 0
@@ -721,6 +842,13 @@ final class StatusBarRenderer {
                     xOffset += Layout.displaySeparatorWidth
                 }
 
+                if let color = displayIcons.first?.displayBackgroundColor {
+                    Self.drawBackground(
+                        in: NSRect(x: xOffset, y: 0, width: displayWidths[displayIndex], height: Layout.statusItemHeight),
+                        color: color,
+                        inset: 0
+                    )
+                }
                 for rendered in displayIcons {
                     let drawRect = NSRect(
                         x: xOffset,
@@ -730,19 +858,44 @@ final class StatusBarRenderer {
                     )
 
                     let alpha = rendered.slot.isActive ? 1.0 : inactiveAlpha
+                    if rendered.slot.isActive {
+                        Self.drawBackground(in: drawRect, color: Self.activeSpaceBackgroundColor, inset: 2)
+                    } else if rendered.slot.isDisplayActiveSpace {
+                        Self.drawBackground(in: drawRect, color: Self.visibleSpaceBackgroundColor, inset: 2)
+                    }
                     rendered.icon.draw(
                         in: drawRect,
                         from: NSRect(origin: .zero, size: rendered.icon.size),
                         operation: .sourceOver,
                         fraction: alpha
                     )
+                    if rendered.slot.isFullscreen, rendered.slot.isDisplayActiveSpace {
+                        Self.drawFullscreenBorder(
+                            in: drawRect,
+                            color: rendered.slot.isActive ? Self.activeSpaceBackgroundColor : Self.visibleSpaceBackgroundColor,
+                            inset: 2
+                        )
+                    }
 
                     xOffset += rendered.icon.size.width
                 }
             }
         }
-        image.isTemplate = isTemplate
+        image.isTemplate = false
         return image
+    }
+
+    private static func drawBackground(in rect: NSRect, color: NSColor, inset: CGFloat = 0.5) {
+        let background = NSBezierPath(roundedRect: rect.insetBy(dx: inset, dy: inset), xRadius: 3, yRadius: 3)
+        color.setFill()
+        background.fill()
+    }
+
+    private static func drawFullscreenBorder(in rect: NSRect, color: NSColor, inset: CGFloat) {
+        let border = NSBezierPath(roundedRect: rect.insetBy(dx: inset + 1, dy: inset + 1), xRadius: 2, yRadius: 2)
+        border.lineWidth = 2
+        color.setStroke()
+        border.stroke()
     }
 
     /// Fully resolved inputs for one space icon, computed from preferences
@@ -965,7 +1118,12 @@ final class StatusBarRenderer {
     }
 
     /// Draws a fully resolved spec, dispatching to SpaceIconGenerator.
-    private func render(_ spec: IconSpec, nativeTint: Bool = false) -> NSImage {
+    private func render(
+        _ spec: IconSpec,
+        nativeTint: Bool = false,
+        selected: Bool = false,
+        displayBackground: NSColor? = nil
+    ) -> NSImage {
         if !spec.appIcons.isEmpty {
             let key: NSArray = [spec.appIcons, spec.sizeScale, spec.paddingScale, spec.darkMode]
             if let image = fullscreenIconCache.object(forKey: key) {
@@ -979,6 +1137,17 @@ final class StatusBarRenderer {
             fullscreenIconCache.setObject(image, forKey: key)
             return image
         }
+        let backgroundColor = selected ? Self.activeSpaceBackgroundColor : displayBackground
+        let colors = backgroundColor.map { background in
+            SpaceColors(
+                foreground: selected ? .white : .black,
+                background: .clear,
+                symbol: selected ? .white : .black,
+                symbolBackground: spec.colors?.symbolBackground.map {
+                    background.withAlphaComponent($0.alphaComponent)
+                }
+            )
+        } ?? spec.colors
         if let symbol = spec.symbol {
             if spec.hasCustomLabel {
                 return SpaceIconGenerator.generateCombinedIcon(
@@ -988,7 +1157,7 @@ final class StatusBarRenderer {
                     wrap: spec.symbolWrap,
                     gap: spec.symbolGap,
                     darkMode: spec.darkMode,
-                    customColors: spec.colors,
+                    customColors: colors,
                     customFont: spec.font,
                     style: spec.style,
                     skinTone: spec.skinTone,
@@ -1000,7 +1169,7 @@ final class StatusBarRenderer {
             return SpaceIconGenerator.generateSymbolIcon(
                 symbolName: symbol,
                 darkMode: spec.darkMode,
-                customColors: spec.colors,
+                customColors: colors,
                 skinTone: spec.skinTone,
                 sizeScale: spec.sizeScale,
                 paddingScale: spec.paddingScale
@@ -1009,7 +1178,7 @@ final class StatusBarRenderer {
         let image = SpaceIconGenerator.generateIcon(
             for: spec.text,
             darkMode: spec.darkMode,
-            customColors: nativeTint ? SpaceColors(foreground: .clear, background: .black) : spec.colors,
+            customColors: nativeTint ? SpaceColors(foreground: .clear, background: .black) : colors,
             customFont: spec.font,
             style: spec.style,
             sizeScale: spec.sizeScale,
@@ -1071,7 +1240,8 @@ final class StatusBarRenderer {
     /// the icon cache is invalidated, causing the next `statusBarIcon` access to re-render.
     private func getCachedSpacesWithWindows(forSpaceIDs spaceIDs: [Int]) -> Set<Int> {
         let now = Date()
-        let cacheValid = cachedSpacesWithWindowsSpaceIDs == spaceIDs &&
+        let request = windowScanRequest(forSpaceIDs: spaceIDs)
+        let cacheValid = cachedWindowScanRequest == request &&
             now.timeIntervalSince(cachedSpacesWithWindowsTime) < Self.spacesWithWindowsCacheTTL
 
         if !cacheValid {
@@ -1080,26 +1250,48 @@ final class StatusBarRenderer {
                 scheduleBackgroundWindowScan(forSpaceIDs: spaceIDs)
             } else {
                 // First call: populate synchronously so we have valid data to return
-                cachedSpacesWithWindows = displaySpaceProvider.spacesWithWindows(forSpaceIDs: spaceIDs)
+                let result = Self.scanWindows(provider: displaySpaceProvider, request: request)
+                cachedSpacesWithWindows = result.spacesWithWindows
+                cachedAppOwners = result.appOwners
                 cachedSpacesWithWindowsTime = now
-                cachedSpacesWithWindowsSpaceIDs = spaceIDs
+                cachedSpacesWithWindowsSpaceIDs = request.spaceIDs
+                cachedWindowScanRequest = request
                 cachedSpacesWithWindowsPopulated = true
             }
         }
         return cachedSpacesWithWindows
     }
 
-    /// Runs `spacesWithWindows` on a background thread and updates the cache on completion.
+    private func windowScanRequest(forSpaceIDs spaceIDs: [Int]) -> WindowScanRequest {
+        WindowScanRequest(
+            spaceIDs: showsMenuBarAppIcons ? menuBarAppSpaceIDs : spaceIDs,
+            includeOccupancy: store.hideEmptySpaces,
+            includeAppOwners: showsMenuBarAppIcons
+        )
+    }
+
+    nonisolated private static func scanWindows(
+        provider: DisplaySpaceProvider,
+        request: WindowScanRequest
+    ) -> WindowScanResult {
+        WindowScanResult(
+            spacesWithWindows: request.includeOccupancy ? provider.spacesWithWindows(forSpaceIDs: request.spaceIDs) : [],
+            appOwners: request.includeAppOwners ? provider.windowOwnerPIDs(forSpaceIDs: request.spaceIDs) : [:]
+        )
+    }
+
+    /// Scans window occupancy and app owners off-main, sharing one single-flight queue.
     private func scheduleBackgroundWindowScan(forSpaceIDs spaceIDs: [Int]) {
+        let request = windowScanRequest(forSpaceIDs: spaceIDs)
         guard backgroundScanTask == nil else {
-            pendingBackgroundScan = WindowScanRequest(spaceIDs: spaceIDs)
+            pendingBackgroundScan = request
             return
         }
 
         let provider = displaySpaceProvider
         backgroundScanTask = Task { [weak self] in
             let result = await Task.detached {
-                provider.spacesWithWindows(forSpaceIDs: spaceIDs)
+                Self.scanWindows(provider: provider, request: request)
             }.value
 
             guard let self else {
@@ -1109,11 +1301,11 @@ final class StatusBarRenderer {
             // Drop a cancelled scan's result but still run the bookkeeping -
             // returning here would leave `backgroundScanTask` set and wedge
             // the single-flight queue permanently
-            finishBackgroundWindowScan(result, forSpaceIDs: spaceIDs, cancelled: Task.isCancelled)
+            finishBackgroundWindowScan(result, request: request, cancelled: Task.isCancelled)
         }
     }
 
-    private func finishBackgroundWindowScan(_ result: Set<Int>, forSpaceIDs spaceIDs: [Int], cancelled: Bool) {
+    private func finishBackgroundWindowScan(_ result: WindowScanResult, request: WindowScanRequest, cancelled: Bool) {
         backgroundScanTask = nil
         let pendingRequest = pendingBackgroundScan
         pendingBackgroundScan = nil
@@ -1121,11 +1313,13 @@ final class StatusBarRenderer {
         // A cancelled scan or a topology change made this result obsolete. Keep
         // the existing stale cache visible until the queued follow-up produces
         // current data.
-        if !cancelled, pendingRequest == nil || pendingRequest?.spaceIDs == spaceIDs {
-            let changed = result != cachedSpacesWithWindows
-            cachedSpacesWithWindows = result
+        if !cancelled, pendingRequest == nil || pendingRequest == request {
+            let changed = result.spacesWithWindows != cachedSpacesWithWindows || result.appOwners != cachedAppOwners
+            cachedSpacesWithWindows = result.spacesWithWindows
+            cachedAppOwners = result.appOwners
             cachedSpacesWithWindowsTime = Date()
-            cachedSpacesWithWindowsSpaceIDs = spaceIDs
+            cachedSpacesWithWindowsSpaceIDs = request.spaceIDs
+            cachedWindowScanRequest = request
             cachedSpacesWithWindowsPopulated = true
             if changed {
                 invalidateIconCache()
@@ -1215,6 +1409,7 @@ final class StatusBarRenderer {
                 displayLabel: displayLabel,
                 spaceID: entry.id,
                 isActive: isActive,
+                isDisplayActiveSpace: isActive,
                 isFullscreen: isFullscreen
             ))
         }
@@ -1282,6 +1477,7 @@ final class StatusBarRenderer {
                     displayLabel: displayLabel,
                     spaceID: entry.id,
                     isActive: isActive,
+                    isDisplayActiveSpace: isDisplayActiveSpace,
                     isFullscreen: isFullscreen
                 ))
             }

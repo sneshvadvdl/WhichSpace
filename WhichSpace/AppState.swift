@@ -135,6 +135,12 @@ extension Notification.Name {
 }
 
 /// Geometry for rendered status bar icons (used for hit testing)
+struct StatusBarAppIconSlot: Equatable {
+    let startX: Double
+    let width: Double
+    let ownerPID: pid_t
+}
+
 struct StatusBarIconSlot: Equatable {
     let startX: Double
     let width: Double
@@ -143,6 +149,12 @@ struct StatusBarIconSlot: Equatable {
     let targetSpace: Int?
     /// The CGS space ID (used to find apps on fullscreen spaces)
     let spaceID: Int
+    var appIcons: [StatusBarAppIconSlot] = []
+
+    func appPID(at x: Double) -> pid_t? {
+        let localX = x - startX
+        return appIcons.first { localX >= $0.startX && localX < $0.startX + $0.width }?.ownerPID
+    }
 }
 
 /// Layout of status bar icons with hit testing support
@@ -476,6 +488,20 @@ final class AppState {
                 let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
                 self?.rememberUserApplication(application)
                 self?.handleSpaceUpdate(.fallback)
+            }
+        })
+
+        // Window creation/closure need not change Spaces or activate an app.
+        // Poll only the enabled app-icon mode to cover those silent changes.
+        notificationTasks.append(Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                guard !Task.isCancelled, let self else {
+                    return
+                }
+                if renderer.showsMenuBarAppIcons {
+                    handleSpaceUpdate(.windowMembership)
+                }
             }
         })
 

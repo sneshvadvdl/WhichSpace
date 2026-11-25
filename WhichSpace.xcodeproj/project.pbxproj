@@ -105,6 +105,7 @@
 		A487D73E80DD98FEC3974AB0 /* MenuBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7C030C19840D638AEC463CE /* MenuBuilder.swift */; };
 		9B438AA5F8A14DDF99ECC1B9 /* SpaceLabelMenuField.swift in Sources */ = {isa = PBXBuildFile; fileRef = B97921319B8F444D814CA1FC /* SpaceLabelMenuField.swift */; };
 		2343A9408B914B708A21AC08 /* StatusBarRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24AF849C10194983B7CE0EC3 /* StatusBarRenderer.swift */; };
+		B75D1CA1BEAE444D92D09A01 /* DesktopAccents.swift in Sources */ = {isa = PBXBuildFile; fileRef = B75D1CA1BEAE444D92D09A02 /* DesktopAccents.swift */; };
 		178A29C9ED824543943550A2 /* SpaceSnapshotService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 692124D6E332492E93C5FE4C /* SpaceSnapshotService.swift */; };
 		67C5C0748C96D7026E8642AF /* ActionHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B1BC45410352F4BF33C9FD3 /* ActionHandler.swift */; };
 		DC7F94B898D44CB18017A20B /* Accessibility.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F8A1BFF1531410487C22D45 /* Accessibility.swift */; };
@@ -236,6 +237,7 @@
 		B7C030C19840D638AEC463CE /* MenuBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBuilder.swift; sourceTree = "<group>"; };
 		B97921319B8F444D814CA1FC /* SpaceLabelMenuField.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpaceLabelMenuField.swift; sourceTree = "<group>"; };
 		24AF849C10194983B7CE0EC3 /* StatusBarRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusBarRenderer.swift; sourceTree = "<group>"; };
+		B75D1CA1BEAE444D92D09A02 /* DesktopAccents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesktopAccents.swift; sourceTree = "<group>"; };
 		692124D6E332492E93C5FE4C /* SpaceSnapshotService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpaceSnapshotService.swift; sourceTree = "<group>"; };
 		8B1BC45410352F4BF33C9FD3 /* ActionHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActionHandler.swift; sourceTree = "<group>"; };
 		5F8A1BFF1531410487C22D45 /* Accessibility.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Accessibility.swift; sourceTree = "<group>"; };
@@ -312,6 +314,7 @@
 				5EB457C82EEDE8C00021C6BD /* AppState.swift */,
 				0621BB91706643C2B80B3FB2 /* SpaceUpdateCoordinator.swift */,
 				24AF849C10194983B7CE0EC3 /* StatusBarRenderer.swift */,
+				B75D1CA1BEAE444D92D09A02 /* DesktopAccents.swift */,
 				692124D6E332492E93C5FE4C /* SpaceSnapshotService.swift */,
 				33F5216D5566486C8F0B2A59 /* SpaceChangeNotifier.swift */,
 				5EB457F22EEDE8C00021C6BD /* SpaceMonitor.swift */,
@@ -692,6 +695,7 @@
 				6A01E545D226462CBA8515E4 /* ScriptingAppearance.swift in Sources */,
 				9F7208519A55488C99F80221 /* URLCommands.swift in Sources */,
 				2343A9408B914B708A21AC08 /* StatusBarRenderer.swift in Sources */,
+				B75D1CA1BEAE444D92D09A01 /* DesktopAccents.swift in Sources */,
 				178A29C9ED824543943550A2 /* SpaceSnapshotService.swift in Sources */,
 				67C5C0748C96D7026E8642AF /* ActionHandler.swift in Sources */,
 				DC7F94B898D44CB18017A20B /* Accessibility.swift in Sources */,
